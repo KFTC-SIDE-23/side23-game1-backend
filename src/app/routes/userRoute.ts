@@ -2,18 +2,14 @@ import { Router } from "express";
 import { getUserProfile } from "../../services/userService";
 
 const userRouter = Router();
+
 /**
- * 유저 조회 라우트
+ * UID로 유저 프로필 조회
+ * GET /api/user/:uid → { name, avatar }
  */
-userRouter.get("/profile/:id", (req, res) => {
-  const id = Number(req.params.id);
-
-  if (!Number.isInteger(id)) {
-    res.status(400).json({ error: "Invalid user ID" });
-    return;
-  }
-
-  res.json(getUserProfile(id));
+userRouter.get("/:uid", (req, res) => {
+  const profile = getUserProfile(req.params.uid);
+  res.json(profile);
 });
 
 export default userRouter;
