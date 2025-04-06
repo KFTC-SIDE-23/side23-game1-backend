@@ -2,16 +2,12 @@ import express, { Application } from "express";
 import http from "http";
 import { Server } from "socket.io";
 import { setupRoutes } from "./routes/index";
-import { setupSocket } from "./socket";
 import { config } from "../config/env";
 
-export const createServer = (): {
-  app: Application;
-  server: http.Server;
-  io: Server;
-} => {
-  const app = express();
+export const createServer = () => {
+  const app: Application = express();
   const server = http.createServer(app);
+
   const io = new Server(server, {
     cors: {
       origin: config.clientUrl,
@@ -19,12 +15,8 @@ export const createServer = (): {
     },
   });
 
-  // 미들웨어, 라우터 설정
   app.use(express.json());
   setupRoutes(app);
 
-  // Socket.IO
-  setupSocket(io);
-
-  return { app, server, io };
+  return { app, server };
 };
