@@ -5,7 +5,7 @@ function generateUniqueRoomId(): number {
   let tries = 0;
 
   do {
-    roomId = Math.floor(10000 + Math.random() * 90000); // 10000 ~ 99999
+    roomId = Math.floor(10000 + Math.random() * 90000);
     tries++;
     if (tries > 100) throw new Error("Failed to generate unique room ID");
   } while (isRoomIdTaken(roomId));

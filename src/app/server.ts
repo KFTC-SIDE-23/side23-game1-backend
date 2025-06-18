@@ -3,6 +3,7 @@ import http from "http";
 import { Server } from "socket.io";
 import { setupRoutes } from "./routes/index";
 import { config } from "../config/env";
+import { setupGameSocket } from "./sockets/gameSocket";
 
 export const createServer = () => {
   const app: Application = express();
@@ -17,6 +18,7 @@ export const createServer = () => {
 
   app.use(express.json());
   setupRoutes(app);
+  setupGameSocket(io);
 
-  return { app, server };
+  return server;
 };

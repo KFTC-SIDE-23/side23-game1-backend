@@ -1,7 +1,7 @@
 import { createServer } from "./app/server";
 import { config } from "./config/env";
 
-const { server } = createServer();
+const server = createServer();
 const PORT = config.port;
 
 server.listen(PORT, () => {
