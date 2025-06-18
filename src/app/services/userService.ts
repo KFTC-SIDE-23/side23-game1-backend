@@ -19,7 +19,7 @@ export function getUserProfile(uid: string) {
     names.length;
   const name = names[index];
 
-  const avatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(uid)}`;
+  const avatar = `https://api.dicebear.com/7.x/adventurer/png?seed=${encodeURIComponent(uid)}`;
 
   return {
     name,
