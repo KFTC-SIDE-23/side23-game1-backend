@@ -1,23 +1,36 @@
 import { Server, Socket } from "socket.io";
 import { getRoom } from "../stores/roomStore";
 
+const WORDS = [
+  "사과",
+  "바나나",
+  "자동차",
+  "비행기",
+  "고양이",
+  "강아지",
+  "컴퓨터",
+  "책상",
+  "의자",
+  "커피",
+];
+
 interface Player {
   socketId: string;
   uid: string;
   name: string;
   avatar: string;
   word: string | null;
-  isDrawing: boolean;
+  drawings: string[]; // 각 라운드별 그림(데이터)
+  answers: string[]; // 각 라운드별 정답(텍스트)
 }
 
 interface GameState {
-  players: Map<string, Player>;
+  players: Player[];
   currentRound: number;
-  currentPlayerIndex: number;
   isGameStarted: boolean;
-  isRoundStarted: boolean;
   roundTime: number;
   timer: NodeJS.Timeout | null;
+  roundSubmissions: Map<string, boolean>; // socketId -> 제출 여부
 }
 
 const gameStates: Map<number, GameState> = new Map();
@@ -39,110 +52,103 @@ export const setupGameSocket = (io: Server) => {
       // 게임 상태 초기화 또는 가져오기
       if (!gameStates.has(roomId)) {
         gameStates.set(roomId, {
-          players: new Map(),
+          players: [],
           currentRound: 0,
-          currentPlayerIndex: 0,
           isGameStarted: false,
-          isRoundStarted: false,
-          roundTime: 60, // 60초
+          roundTime: 60,
           timer: null,
+          roundSubmissions: new Map(),
         });
       }
 
       const gameState = gameStates.get(roomId)!;
-      const player: Player = {
-        socketId: socket.id,
-        uid,
-        name,
-        avatar,
-        word: null,
-        isDrawing: false,
-      };
-
-      gameState.players.set(socket.id, player);
+      // 중복 입장 방지
+      if (!gameState.players.find((p) => p.socketId === socket.id)) {
+        const player: Player = {
+          socketId: socket.id,
+          uid,
+          name,
+          avatar,
+          word: null,
+          drawings: [],
+          answers: [],
+        };
+        gameState.players.push(player);
+      }
 
       // 방의 모든 플레이어에게 업데이트된 플레이어 목록 전송
       io.to(roomId.toString()).emit("players_updated", {
-        players: Array.from(gameState.players.values()),
+        players: gameState.players.map(({ name, avatar }) => ({
+          name,
+          avatar,
+        })),
       });
     });
 
-    // 제시어 제출
-    socket.on("submit_word", ({ roomId, word }) => {
-      const gameState = gameStates.get(roomId);
-      if (!gameState) return;
-
-      const player = gameState.players.get(socket.id);
-      if (player) {
-        player.word = word;
-
-        // 모든 플레이어가 제시어를 제출했는지 확인
-        const allWordsSubmitted = Array.from(gameState.players.values()).every(
-          (p) => p.word !== null
-        );
-
-        if (allWordsSubmitted) {
-          startGame(io, roomId);
-        }
-      }
-    });
-
     // 게임 시작
-    function startGame(io: Server, roomId: number) {
+    socket.on("start_game", ({ roomId }) => {
       const gameState = gameStates.get(roomId);
       if (!gameState) return;
+      if (gameState.isGameStarted) return;
+
+      // 제시어 랜덤 배정
+      const usedWords = new Set<string>();
+      gameState.players.forEach((player) => {
+        let word;
+        do {
+          word = WORDS[Math.floor(Math.random() * WORDS.length)];
+        } while (usedWords.has(word) && usedWords.size < WORDS.length);
+        player.word = word;
+        usedWords.add(word);
+      });
+
+      // 각 플레이어에게 본인 제시어 전달 (첫 턴)
+      gameState.players.forEach((player) => {
+        io.to(player.socketId).emit("your_word", { word: player.word });
+      });
 
       gameState.isGameStarted = true;
       gameState.currentRound = 1;
-      startNewTurn(io, roomId);
-    }
-
-    // 그림 그리기
-    socket.on("draw", ({ roomId, data }) => {
-      socket.to(roomId.toString()).emit("drawing", data);
+      startNewRound(io, roomId);
     });
 
-    // 정답 제출
+    // 그림 제출 (draw 이벤트)
+    socket.on("submit_drawing", ({ roomId, drawing }) => {
+      const gameState = gameStates.get(roomId);
+      if (!gameState) return;
+      const player = gameState.players.find((p) => p.socketId === socket.id);
+      if (!player) return;
+      player.drawings[gameState.currentRound - 1] = drawing;
+      gameState.roundSubmissions.set(socket.id, true);
+      checkRoundEnd(io, roomId);
+    });
+
+    // 정답 제출 (answer 이벤트)
     socket.on("submit_answer", ({ roomId, answer }) => {
       const gameState = gameStates.get(roomId);
       if (!gameState) return;
-
-      const currentPlayer = Array.from(gameState.players.values())[
-        gameState.currentPlayerIndex
-      ];
-      const nextPlayer = Array.from(gameState.players.values())[
-        (gameState.currentPlayerIndex + 1) % gameState.players.size
-      ];
-
-      if (answer.toLowerCase() === currentPlayer.word?.toLowerCase()) {
-        io.to(roomId.toString()).emit("correct_answer", {
-          player: nextPlayer.name,
-          word: currentPlayer.word,
-        });
-
-        // 다음 턴으로 이동
-        setTimeout(() => {
-          gameState.currentPlayerIndex =
-            (gameState.currentPlayerIndex + 1) % gameState.players.size;
-          startNewTurn(io, roomId);
-        }, 3000);
-      }
+      const player = gameState.players.find((p) => p.socketId === socket.id);
+      if (!player) return;
+      player.answers[gameState.currentRound - 1] = answer;
+      gameState.roundSubmissions.set(socket.id, true);
+      checkRoundEnd(io, roomId);
     });
 
     // 연결 해제
     socket.on("disconnect", () => {
       console.log(`Client disconnected: ${socket.id}`);
-
-      // 플레이어가 속한 방 찾기
       for (const [roomId, gameState] of gameStates.entries()) {
-        if (gameState.players.has(socket.id)) {
-          gameState.players.delete(socket.id);
-
-          // 방의 모든 플레이어에게 업데이트된 플레이어 목록 전송
+        const idx = gameState.players.findIndex(
+          (p) => p.socketId === socket.id
+        );
+        if (idx !== -1) {
+          gameState.players.splice(idx, 1);
           io.to(roomId.toString()).emit("players_updated", {
-            players: Array.from(gameState.players.values()),
+            players: gameState.players.map(({ name, avatar }) => ({
+              name,
+              avatar,
+            })),
           });
-
           break;
         }
       }
@@ -150,83 +156,96 @@ export const setupGameSocket = (io: Server) => {
   });
 };
 
-function startNewTurn(io: Server, roomId: number) {
+function startNewRound(io: Server, roomId: number) {
   const gameState = gameStates.get(roomId);
   if (!gameState) return;
+  const players = gameState.players;
+  if (players.length < 2) return;
 
-  const players = Array.from(gameState.players.values());
-  const currentPlayer = players[gameState.currentPlayerIndex];
-  const nextPlayer =
-    players[(gameState.currentPlayerIndex + 1) % players.length];
-  const isEvenPlayers = players.length % 2 === 0;
+  gameState.roundSubmissions = new Map();
+  gameState.roundTime = 60;
 
-  // 현재 플레이어의 상태 설정
-  currentPlayer.isDrawing = true;
-
-  // 첫 라운드이고 짝수 인원일 때는 자신의 제시어를 보고 그림을 그리도록
-  if (gameState.currentRound === 1 && isEvenPlayers) {
-    io.to(currentPlayer.socketId).emit("your_turn", {
-      word: currentPlayer.word,
-      isDrawing: true,
+  if (gameState.currentRound === 1) {
+    // 1라운드: 각자 제시어만 확인, 아무 행동 없음
+    players.forEach((player) => {
+      io.to(player.socketId).emit("your_word", { word: player.word });
     });
-  } else {
-    // 홀수 인원이거나 첫 라운드가 아닐 때는 다음 플레이어의 제시어를 보고 그림을 그리도록
-    io.to(currentPlayer.socketId).emit("your_turn", {
-      word: nextPlayer.word,
-      isDrawing: true,
-    });
+    // 1라운드는 제출/타이머/다음 라운드로 자동 진행
+    setTimeout(() => {
+      gameState.currentRound++;
+      startNewRound(io, roomId);
+    }, 3000); // 3초 후 자동 진행
+    return;
   }
 
-  // 다른 플레이어들에게는 현재 플레이어가 그림을 그리는 중임을 알림
-  io.to(roomId.toString())
-    .except(currentPlayer.socketId)
-    .emit("player_drawing", {
-      player: currentPlayer.name,
-    });
+  // 2라운드부터: 그림/정답 제출
+  players.forEach((player, idx) => {
+    const n = players.length;
+    const leftIdx = (idx + 1) % n; // 왼쪽 사람
+    if (gameState.currentRound % 2 === 0) {
+      // 짝수 라운드: 왼쪽 사람의 정답을 보고 그림 그리기
+      const answer = players[leftIdx].answers[gameState.currentRound - 2];
+      io.to(player.socketId).emit("your_turn", {
+        type: "draw",
+        word: answer,
+        round: gameState.currentRound,
+      });
+    } else {
+      // 홀수 라운드: 왼쪽 사람의 그림을 보고 정답 맞추기
+      const drawing = players[leftIdx].drawings[gameState.currentRound - 2];
+      io.to(player.socketId).emit("your_turn", {
+        type: "answer",
+        drawing,
+        round: gameState.currentRound,
+      });
+    }
+  });
 
   // 타이머 시작
+  if (gameState.timer) clearInterval(gameState.timer);
   gameState.timer = setInterval(() => {
     gameState.roundTime--;
-
     io.to(roomId.toString()).emit("timer_updated", {
       time: gameState.roundTime,
     });
-
     if (gameState.roundTime <= 0) {
-      endTurn(io, roomId);
+      // 타임아웃: 제출 안한 사람은 자동 제출 처리
+      players.forEach((player) => {
+        if (!gameState.roundSubmissions.get(player.socketId)) {
+          if (gameState.currentRound % 2 === 0) {
+            player.drawings[gameState.currentRound - 1] = "";
+          } else {
+            player.answers[gameState.currentRound - 1] = "";
+          }
+          gameState.roundSubmissions.set(player.socketId, true);
+        }
+      });
+      checkRoundEnd(io, roomId);
     }
   }, 1000);
 }
 
-function endTurn(io: Server, roomId: number) {
+function checkRoundEnd(io: Server, roomId: number) {
   const gameState = gameStates.get(roomId);
   if (!gameState) return;
-
-  if (gameState.timer) {
-    clearInterval(gameState.timer);
-    gameState.timer = null;
-  }
-
-  const currentPlayer = Array.from(gameState.players.values())[
-    gameState.currentPlayerIndex
-  ];
-  currentPlayer.isDrawing = false;
-
-  // 다음 턴으로 이동
-  gameState.currentPlayerIndex =
-    (gameState.currentPlayerIndex + 1) % gameState.players.size;
-  gameState.roundTime = 60;
-
-  // 모든 플레이어가 한 바퀴 돌았는지 확인
-  if (gameState.currentPlayerIndex === 0) {
-    gameState.currentRound++;
-
-    // 게임이 끝났는지 확인 (모든 플레이어가 자신의 제시어를 맞추는 순서까지 돌았는지)
-    if (gameState.currentRound > gameState.players.size) {
-      io.to(roomId.toString()).emit("game_ended");
+  const players = gameState.players;
+  // 모든 플레이어가 제출했는지 확인
+  if (players.every((p) => gameState.roundSubmissions.get(p.socketId))) {
+    if (gameState.timer) {
+      clearInterval(gameState.timer);
+      gameState.timer = null;
+    }
+    // 다음 라운드로
+    if (gameState.currentRound >= players.length) {
+      io.to(roomId.toString()).emit("game_ended", {
+        drawings: players.map((p) => p.drawings),
+        answers: players.map((p) => p.answers),
+        words: players.map((p) => p.word),
+        players: players.map((p) => ({ name: p.name, avatar: p.avatar })),
+      });
       return;
     }
+    gameState.currentRound++;
+    setTimeout(() => startNewRound(io, roomId), 1500);
   }
-
-  startNewTurn(io, roomId);
 }
